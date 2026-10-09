@@ -1,3 +1,4 @@
+
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
@@ -12,7 +13,12 @@ import {
   X,
 } from "lucide-react";
 
-import { getSessions, deleteSession, clearSessions } from "../services/sessionStorage";
+import {
+  getSessions,
+  deleteSession,
+  clearSessions,
+  syncSessionsFromBackend,
+} from "../services/sessionStorage";
 import type { FocusSessionData } from "../types/session";
 
 type SortOption = "newest" | "highest-focus" | "longest";
@@ -24,16 +30,41 @@ function Sessions() {
   const [selectedSession, setSelectedSession] =
     useState<FocusSessionData | null>(null);
 
+  // Load cached sessions first, then synchronize with the backend.
   useEffect(() => {
-    loadSessions();
+    let isMounted = true;
+
+    setSessions(getSessions());
+
+    const loadCloudSessions = async () => {
+      try {
+        const cloudSessions = await syncSessionsFromBackend();
+
+        if (isMounted) {
+          setSessions(cloudSessions);
+        }
+      } catch (error) {
+        console.error(
+          "Could not load sessions from AWS. Showing local history instead:",
+          error
+        );
+
+        if (isMounted) {
+          setSessions(getSessions());
+        }
+      }
+    };
+
+    void loadCloudSessions();
 
     const handleStorageChange = () => {
-      loadSessions();
+      setSessions(getSessions());
     };
 
     window.addEventListener("storage", handleStorageChange);
 
     return () => {
+      isMounted = false;
       window.removeEventListener("storage", handleStorageChange);
     };
   }, []);
@@ -68,9 +99,7 @@ function Sessions() {
 
   const filteredSessions = useMemo(() => {
     const filtered = sessions.filter((session) =>
-      session.title
-        .toLowerCase()
-        .includes(searchQuery.toLowerCase())
+      session.title.toLowerCase().includes(searchQuery.toLowerCase())
     );
 
     return [...filtered].sort((a, b) => {
@@ -82,10 +111,7 @@ function Sessions() {
         return b.duration - a.duration;
       }
 
-      return (
-        new Date(b.date).getTime() -
-        new Date(a.date).getTime()
-      );
+      return new Date(b.date).getTime() - new Date(a.date).getTime();
     });
   }, [sessions, searchQuery, sortBy]);
 
@@ -131,8 +157,8 @@ function Sessions() {
           </h1>
 
           <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">
-            Review your completed focus sessions and explore your
-            individual performance patterns.
+            Review your completed focus sessions and explore your individual
+            performance patterns.
           </p>
         </div>
 
@@ -163,19 +189,14 @@ function Sessions() {
 
           <input
             value={searchQuery}
-            onChange={(event) =>
-              setSearchQuery(event.target.value)
-            }
+            onChange={(event) => setSearchQuery(event.target.value)}
             placeholder="Search sessions..."
             className="w-full bg-transparent py-3.5 text-sm text-white outline-none placeholder:text-slate-600"
           />
         </div>
 
         <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.025] px-4">
-          <SlidersHorizontal
-            size={17}
-            className="text-violet-300"
-          />
+          <SlidersHorizontal size={17} className="text-violet-300" />
 
           <select
             value={sortBy}
@@ -185,12 +206,8 @@ function Sessions() {
             className="bg-transparent py-3 text-sm text-slate-300 outline-none"
           >
             <option value="newest">Newest first</option>
-            <option value="highest-focus">
-              Highest focus
-            </option>
-            <option value="longest">
-              Longest session
-            </option>
+            <option value="highest-focus">Highest focus</option>
+            <option value="longest">Longest session</option>
           </select>
         </div>
       </section>
@@ -198,10 +215,7 @@ function Sessions() {
       {/* EMPTY STATE */}
       {filteredSessions.length === 0 ? (
         <section className="mt-6 rounded-2xl border border-dashed border-white/10 bg-white/[0.02] py-20 text-center">
-          <Brain
-            className="mx-auto text-violet-300"
-            size={40}
-          />
+          <Brain className="mx-auto text-violet-300" size={40} />
 
           <h2 className="mt-5 text-xl font-semibold text-white">
             {sessions.length === 0
@@ -298,9 +312,7 @@ function SessionStat({
         {label}
       </p>
 
-      <p className="mt-1 font-semibold text-slate-200">
-        {value}
-      </p>
+      <p className="mt-1 font-semibold text-slate-200">{value}</p>
     </div>
   );
 }
@@ -435,13 +447,9 @@ function DetailCard({
         </div>
 
         <div>
-          <p className="text-xs text-slate-500">
-            {label}
-          </p>
+          <p className="text-xs text-slate-500">{label}</p>
 
-          <p className="mt-1 text-lg font-semibold text-white">
-            {value}
-          </p>
+          <p className="mt-1 text-lg font-semibold text-white">{value}</p>
         </div>
       </div>
     </div>
@@ -457,9 +465,7 @@ function DetailRow({
 }) {
   return (
     <div className="flex items-center justify-between gap-4 border-b border-white/[0.05] pb-4 last:border-none last:pb-0">
-      <span className="text-sm text-slate-400">
-        {label}
-      </span>
+      <span className="text-sm text-slate-400">{label}</span>
 
       <span className="text-right text-sm font-medium text-slate-200">
         {value}
@@ -469,10 +475,7 @@ function DetailRow({
 }
 
 function getSessionInsight(session: FocusSessionData) {
-  if (
-    session.focusScore >= 85 &&
-    session.consistency >= 70
-  ) {
+  if (session.focusScore >= 85 && session.consistency >= 70) {
     return "This was a strong session with stable typing behaviour and high focus. Your current work rhythm appears well suited for sustained concentration.";
   }
 
