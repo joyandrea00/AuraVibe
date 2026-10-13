@@ -2,9 +2,7 @@
 import type { FocusSessionData, FocusState } from "../types/session";
 
 const STORAGE_KEY = "auravibe_focus_sessions";
-
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "http://localhost:5000/api";
+const API_BASE_URL = "https://auravibe.onrender.com/api";
 
 const FOCUS_STATES: FocusState[] = [
   "CALIBRATING",
@@ -19,21 +17,35 @@ const isFocusState = (value: unknown): value is FocusState =>
   typeof value === "string" &&
   FOCUS_STATES.includes(value as FocusState);
 
-// Normalize older or incomplete session records.
-const normalizeSession = (value: unknown): FocusSessionData | null => {
-  if (!value || typeof value !== "object") return null;
+const isRecord = (
+  value: unknown
+): value is Record<string, unknown> =>
+  typeof value === "object" &&
+  value !== null &&
+  !Array.isArray(value);
 
-  const session = value as Partial<FocusSessionData>;
+const normalizeSession = (
+  value: unknown
+): FocusSessionData | null => {
+  if (!isRecord(value)) return null;
+
+  const session = value;
 
   if (
     typeof session.id !== "string" ||
     typeof session.title !== "string" ||
-    typeof session.date !== "string" ||
     typeof session.duration !== "number" ||
     typeof session.focusScore !== "number"
   ) {
     return null;
   }
+
+  const date =
+    typeof session.date === "string" && session.date
+      ? session.date
+      : typeof session.startTime === "string"
+        ? session.startTime
+        : new Date().toISOString();
 
   const focusState: FocusState = isFocusState(session.focusState)
     ? session.focusState
@@ -52,47 +64,31 @@ const normalizeSession = (value: unknown): FocusSessionData | null => {
         ? session.averageConsistency
         : 0;
 
-  const oldDistribution = session.focusStateDistribution;
+  const oldDistribution = isRecord(session.focusStateDistribution)
+    ? session.focusStateDistribution
+    : {};
 
-  const focusStateDistribution: Record<FocusState, number> = {
-    CALIBRATING:
-      typeof oldDistribution?.CALIBRATING === "number"
-        ? oldDistribution.CALIBRATING
+  const focusStateDistribution = Object.fromEntries(
+    FOCUS_STATES.map((state) => [
+      state,
+      typeof oldDistribution[state] === "number"
+        ? oldDistribution[state]
         : 0,
-    FOCUSED:
-      typeof oldDistribution?.FOCUSED === "number"
-        ? oldDistribution.FOCUSED
-        : 0,
-    DEEP_FOCUS:
-      typeof oldDistribution?.DEEP_FOCUS === "number"
-        ? oldDistribution.DEEP_FOCUS
-        : 0,
-    UNSTABLE:
-      typeof oldDistribution?.UNSTABLE === "number"
-        ? oldDistribution.UNSTABLE
-        : 0,
-    ATTENTION_DRIFT:
-      typeof oldDistribution?.ATTENTION_DRIFT === "number"
-        ? oldDistribution.ATTENTION_DRIFT
-        : 0,
-    IDLE:
-      typeof oldDistribution?.IDLE === "number"
-        ? oldDistribution.IDLE
-        : 0,
-  };
+    ])
+  ) as Record<FocusState, number>;
 
   return {
     id: session.id,
     title: session.title,
-    date: session.date,
+    date,
     startTime:
       typeof session.startTime === "string"
         ? session.startTime
-        : session.date,
+        : date,
     endTime:
       typeof session.endTime === "string"
         ? session.endTime
-        : session.date,
+        : date,
     duration: session.duration,
     focusScore: session.focusScore,
     averageWpm:
@@ -118,7 +114,6 @@ const normalizeSession = (value: unknown): FocusSessionData | null => {
   };
 };
 
-// Read sessions stored in the browser.
 export const getSessions = (): FocusSessionData[] => {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -127,26 +122,35 @@ export const getSessions = (): FocusSessionData[] => {
     const parsed: unknown = JSON.parse(stored);
     if (!Array.isArray(parsed)) return [];
 
-    return parsed
-      .map(normalizeSession)
-      .filter(
-        (session): session is FocusSessionData => session !== null
-      );
+    const uniqueSessions = new Map<string, FocusSessionData>();
+
+    parsed.forEach((item) => {
+      const session = normalizeSession(item);
+      if (session) uniqueSessions.set(session.id, session);
+    });
+
+    return Array.from(uniqueSessions.values());
   } catch (error) {
     console.error("Error loading AuraVibe sessions:", error);
     return [];
   }
 };
 
-// Save locally first, then attempt to save to the backend.
 export const saveSession = async (
   session: FocusSessionData
 ): Promise<void> => {
+  const normalized = normalizeSession(session);
+
+  if (!normalized) {
+    console.error("Invalid session; it was not saved:", session);
+    return;
+  }
+
   try {
     const sessions = getSessions();
     const updated = [
-      session,
-      ...sessions.filter((item) => item.id !== session.id),
+      normalized,
+      ...sessions.filter((item) => item.id !== normalized.id),
     ];
 
     localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
@@ -158,7 +162,7 @@ export const saveSession = async (
     const response = await fetch(`${API_BASE_URL}/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(session),
+      body: JSON.stringify(normalized),
     });
 
     if (!response.ok) {
@@ -167,14 +171,10 @@ export const saveSession = async (
 
     console.log("Focus session synced with the backend.");
   } catch (error) {
-    console.error(
-      "Backend sync failed; the local session is retained:",
-      error
-    );
+    console.error("Backend sync failed:", error);
   }
 };
 
-// Fetch cloud sessions and merge them with local sessions.
 export const syncSessionsFromBackend =
   async (): Promise<FocusSessionData[]> => {
     const response = await fetch(`${API_BASE_URL}/sessions`);
@@ -183,25 +183,33 @@ export const syncSessionsFromBackend =
       throw new Error(`Backend returned HTTP ${response.status}`);
     }
 
-    const data: { sessions?: unknown[] } = await response.json();
+    const data: unknown = await response.json();
 
-    const remoteSessions = Array.isArray(data.sessions)
-      ? data.sessions
-          .map(normalizeSession)
-          .filter(
-            (session): session is FocusSessionData =>
-              session !== null
-          )
-      : [];
+    let rawSessions: unknown[];
+
+    if (Array.isArray(data)) {
+      rawSessions = data;
+    } else if (isRecord(data) && Array.isArray(data.sessions)) {
+      rawSessions = data.sessions;
+    } else {
+      throw new Error("The sessions API returned an unexpected response.");
+    }
+
+    const remoteSessions = rawSessions
+      .map(normalizeSession)
+      .filter(
+        (session): session is FocusSessionData => session !== null
+      );
+
+    console.log("Sessions returned by API:", rawSessions.length);
+    console.log("Valid cloud sessions:", remoteSessions.length);
 
     const sessionsById = new Map<string, FocusSessionData>();
 
-    // Add local sessions first.
     getSessions().forEach((session) => {
       sessionsById.set(session.id, session);
     });
 
-    // Cloud versions replace local versions with matching IDs.
     remoteSessions.forEach((session) => {
       sessionsById.set(session.id, session);
     });
@@ -220,22 +228,23 @@ export const syncSessionsFromBackend =
       console.error("Error caching synced sessions:", error);
     }
 
+    console.log("Total sessions after merge:", mergedSessions.length);
+
     return mergedSessions;
   };
 
-// Delete a session from local browser history.
 export const deleteSession = (id: string): void => {
   try {
     const updated = getSessions().filter(
       (session) => session.id !== id
     );
+
     localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
   } catch (error) {
     console.error("Error deleting session:", error);
   }
 };
 
-// Clear local browser history.
 export const clearSessions = (): void => {
   try {
     localStorage.removeItem(STORAGE_KEY);
