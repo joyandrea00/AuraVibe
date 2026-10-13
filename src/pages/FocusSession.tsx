@@ -14,22 +14,18 @@ import {
 } from "lucide-react";
 
 import { useTelemetry } from "../hooks/useTelemetry";
-
 import {
   calculateFocusScore,
   determineFocusState,
   type FocusState,
 } from "../utils/focusCalculator";
-
 import { getAdaptiveSoundscape } from "../utils/soundEngine";
 import { audioEngine } from "../services/audioEngine";
 import { useAppContext } from "../context/AppContext";
-
 import type {
   FocusSessionData,
   FocusState as StoredFocusState,
 } from "../types/session";
-
 import { saveSession } from "../services/sessionStorage";
 
 type AppPreferences = {
@@ -39,6 +35,9 @@ type AppPreferences = {
   soundEnabled: boolean;
   notificationsEnabled: boolean;
 };
+
+type TimerMode = "FOCUS" | "SHORT_BREAK" | "LONG_BREAK";
+type SessionStatus = "READY" | "RUNNING" | "PAUSED" | "ENDED";
 
 const DEFAULT_PREFERENCES: AppPreferences = {
   focusDuration: 25,
@@ -51,7 +50,6 @@ const DEFAULT_PREFERENCES: AppPreferences = {
 function readPreferences(): AppPreferences {
   try {
     const saved = localStorage.getItem("auravibe-settings");
-
     if (!saved) return DEFAULT_PREFERENCES;
 
     const parsed = JSON.parse(saved);
@@ -75,6 +73,10 @@ function readPreferences(): AppPreferences {
         typeof parsed.soundEnabled === "boolean"
           ? parsed.soundEnabled
           : DEFAULT_PREFERENCES.soundEnabled,
+      notificationsEnabled:
+        typeof parsed.notificationsEnabled === "boolean"
+          ? parsed.notificationsEnabled
+          : DEFAULT_PREFERENCES.notificationsEnabled,
     };
   } catch {
     return DEFAULT_PREFERENCES;
@@ -88,29 +90,23 @@ function FocusSession() {
     setSelectedSoundscape,
   } = useAppContext();
 
-  const [sessionStatus, setSessionStatus] = useState<
-    "READY" | "RUNNING" | "PAUSED" | "ENDED"
-  >("READY");
-
+  const [sessionStatus, setSessionStatus] =
+    useState<SessionStatus>("READY");
+  const [timerMode, setTimerMode] = useState<TimerMode>("FOCUS");
   const [sessionTitle, setSessionTitle] =
     useState("Deep Work Session");
-
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [breakSecondsRemaining, setBreakSecondsRemaining] = useState(0);
   const [text, setText] = useState("");
   const [driftEvents, setDriftEvents] = useState(0);
-
   const [preferences, setPreferences] =
     useState<AppPreferences>(readPreferences);
 
   const driftDetectedRef = useRef(false);
   const sessionStartedAtRef = useRef<Date | null>(null);
-
   const wpmSamplesRef = useRef<number[]>([]);
   const consistencySamplesRef = useRef<number[]>([]);
-
-  const focusStateCountsRef = useRef<
-    Record<StoredFocusState, number>
-  >({
+  const focusStateCountsRef = useRef<Record<StoredFocusState, number>>({
     CALIBRATING: 0,
     FOCUSED: 0,
     DEEP_FOCUS: 0,
@@ -118,24 +114,34 @@ function FocusSession() {
     ATTENTION_DRIFT: 0,
     IDLE: 0,
   });
-
   const lastTrackedSecondRef = useRef(-1);
 
   const isRunning = sessionStatus === "RUNNING";
+  const isFocusMode = timerMode === "FOCUS";
+  const focusDurationSeconds = preferences.focusDuration * 60;
 
-  const focusDurationSeconds =
-    preferences.focusDuration * 60;
+  const breakDurationSeconds =
+    (timerMode === "SHORT_BREAK"
+      ? preferences.shortBreak
+      : preferences.longBreak) * 60;
 
   const isFocusComplete =
-    elapsedSeconds >= focusDurationSeconds;
+    isFocusMode && elapsedSeconds >= focusDurationSeconds;
+
+  const isBreakComplete =
+    !isFocusMode && breakSecondsRemaining <= 0;
+
+  const isTimerComplete = isFocusMode
+    ? isFocusComplete
+    : isBreakComplete;
 
   const {
     telemetry,
     registerKeystroke,
     resetTelemetry,
-  } = useTelemetry(isRunning);
+  } = useTelemetry(isRunning && isFocusMode);
 
-  /* SYNCHRONIZE PREFERENCES FROM SETTINGS */
+  /* Synchronize preferences from Settings */
   useEffect(() => {
     const syncPreferences = () => {
       setPreferences(readPreferences());
@@ -165,34 +171,41 @@ function FocusSession() {
     };
   }, []);
 
-  /* SESSION TIMER */
+  /* Focus and break countdowns */
   useEffect(() => {
-    if (!isRunning || isFocusComplete) return;
+    if (!isRunning || isTimerComplete) return;
 
     const timer = window.setInterval(() => {
-      setElapsedSeconds((seconds) =>
-        Math.min(seconds + 1, focusDurationSeconds)
-      );
+      if (isFocusMode) {
+        setElapsedSeconds((seconds) =>
+          Math.min(seconds + 1, focusDurationSeconds)
+        );
+      } else {
+        setBreakSecondsRemaining((seconds) =>
+          Math.max(seconds - 1, 0)
+        );
+      }
     }, 1000);
 
     return () => window.clearInterval(timer);
   }, [
     isRunning,
-    isFocusComplete,
+    isFocusMode,
+    isTimerComplete,
     focusDurationSeconds,
   ]);
 
-  /* PAUSE WHEN FOCUS DURATION IS REACHED */
+  /* Pause automatically when a timer completes */
   useEffect(() => {
-    if (isRunning && isFocusComplete) {
+    if (isRunning && isTimerComplete) {
       audioEngine.stop();
       setSessionStatus("PAUSED");
     }
-  }, [isRunning, isFocusComplete]);
+  }, [isRunning, isTimerComplete]);
 
-  /* LIVE FOCUS SCORE */
+  /* Live focus score */
   const focusScore = useMemo(() => {
-    if (sessionStatus === "READY") return 0;
+    if (sessionStatus === "READY" || !isFocusMode) return 0;
 
     return calculateFocusScore({
       wpm: telemetry.wpm,
@@ -204,13 +217,15 @@ function FocusSession() {
     telemetry.consistency,
     telemetry.pauseDuration,
     sessionStatus,
+    isFocusMode,
   ]);
 
-  /* LIVE FOCUS STATE */
+  /* Live focus state */
   const focusState: FocusState = useMemo(() => {
     if (
       sessionStatus === "READY" ||
-      sessionStatus === "ENDED"
+      sessionStatus === "ENDED" ||
+      !isFocusMode
     ) {
       return "CALIBRATING";
     }
@@ -223,9 +238,10 @@ function FocusSession() {
     focusScore,
     telemetry.pauseDuration,
     sessionStatus,
+    isFocusMode,
   ]);
 
-  /* ADAPTIVE SOUND RECOMMENDATION */
+  /* Adaptive sound recommendation */
   const adaptiveSound = useMemo(
     () =>
       getAdaptiveSoundscape(
@@ -233,30 +249,31 @@ function FocusSession() {
         telemetry.wpm,
         telemetry.consistency
       ),
-    [
-      focusState,
-      telemetry.wpm,
-      telemetry.consistency,
-    ]
+    [focusState, telemetry.wpm, telemetry.consistency]
   );
 
-  /* UPDATE SELECTED SOUNDSCAPE */
+  /* Update selected soundscape while focusing */
   useEffect(() => {
-    if (!isRunning) return;
+    if (!isRunning || !isFocusMode) return;
 
     if (selectedSoundscape !== adaptiveSound.name) {
       setSelectedSoundscape(adaptiveSound.name);
     }
   }, [
     isRunning,
+    isFocusMode,
     adaptiveSound.name,
     selectedSoundscape,
     setSelectedSoundscape,
   ]);
 
-  /* REAL AUDIO PLAYBACK, RESPECTING SETTINGS */
+  /* Audio playback, respecting Settings */
   useEffect(() => {
-    if (!isRunning || !preferences.soundEnabled) {
+    if (
+      !isRunning ||
+      !isFocusMode ||
+      !preferences.soundEnabled
+    ) {
       audioEngine.stop();
       return;
     }
@@ -271,39 +288,44 @@ function FocusSession() {
     };
   }, [
     isRunning,
+    isFocusMode,
     preferences.soundEnabled,
     adaptiveSound.name,
     adaptiveSound.intensity,
   ]);
 
-  /* COLLECT REAL-TIME ANALYTICS */
+  /* Collect focus analytics only during focus sessions */
   useEffect(() => {
-    if (!isRunning || elapsedSeconds === 0) return;
-
-    if (lastTrackedSecondRef.current === elapsedSeconds) {
+    if (
+      !isRunning ||
+      !isFocusMode ||
+      elapsedSeconds === 0 ||
+      lastTrackedSecondRef.current === elapsedSeconds
+    ) {
       return;
     }
 
     lastTrackedSecondRef.current = elapsedSeconds;
-
     wpmSamplesRef.current.push(telemetry.wpm);
+    consistencySamplesRef.current.push(telemetry.consistency);
 
-    consistencySamplesRef.current.push(
-      telemetry.consistency
-    );
-
-    const currentState = focusState as StoredFocusState;
-    focusStateCountsRef.current[currentState] += 1;
+    focusStateCountsRef.current[focusState as StoredFocusState] += 1;
   }, [
     isRunning,
+    isFocusMode,
     elapsedSeconds,
     telemetry.wpm,
     telemetry.consistency,
     focusState,
   ]);
 
-  /* DETECT ATTENTION DRIFT */
+  /* Detect attention drift during focus */
   useEffect(() => {
+    if (!isFocusMode) {
+      driftDetectedRef.current = false;
+      return;
+    }
+
     const isDrifting =
       focusState === "ATTENTION_DRIFT" ||
       focusState === "IDLE";
@@ -316,13 +338,14 @@ function FocusSession() {
     if (!isDrifting) {
       driftDetectedRef.current = false;
     }
-  }, [focusState]);
+  }, [focusState, isFocusMode]);
 
-  /* START / RESUME */
+  /* Start or resume a focus session */
   const startSession = () => {
     if (sessionStatus === "PAUSED") {
-      if (isFocusComplete) {
+      if (isTimerComplete) {
         setSessionStatus("ENDED");
+        audioEngine.stop();
         return;
       }
 
@@ -334,9 +357,12 @@ function FocusSession() {
       sessionStatus === "READY" ||
       sessionStatus === "ENDED"
     ) {
+      audioEngine.stop();
       resetTelemetry();
 
+      setTimerMode("FOCUS");
       setElapsedSeconds(0);
+      setBreakSecondsRemaining(0);
       setText("");
       setDriftEvents(0);
 
@@ -356,20 +382,42 @@ function FocusSession() {
       };
 
       lastTrackedSecondRef.current = -1;
-
       setSessionStatus("RUNNING");
     }
   };
 
-  /* PAUSE */
+  /* Start a short or long break */
+  const startBreak = (mode: "SHORT_BREAK" | "LONG_BREAK") => {
+    audioEngine.stop();
+
+    const duration =
+      mode === "SHORT_BREAK"
+        ? preferences.shortBreak
+        : preferences.longBreak;
+
+    setTimerMode(mode);
+    setBreakSecondsRemaining(duration * 60);
+    setSessionStatus("RUNNING");
+  };
+
+  /* Pause */
   const pauseSession = () => {
     if (sessionStatus === "RUNNING") {
       setSessionStatus("PAUSED");
+      audioEngine.stop();
     }
   };
 
-  /* END AND SAVE */
+  /* End and save focus session; breaks are never saved as focus */
   const endSession = () => {
+    if (!isFocusMode) {
+      audioEngine.stop();
+      setSessionStatus("ENDED");
+      setTimerMode("FOCUS");
+      setBreakSecondsRemaining(0);
+      return;
+    }
+
     if (elapsedSeconds === 0) {
       audioEngine.stop();
       setSessionStatus("ENDED");
@@ -377,7 +425,6 @@ function FocusSession() {
     }
 
     const endTime = new Date();
-
     const startTime =
       sessionStartedAtRef.current ?? endTime;
 
@@ -401,9 +448,7 @@ function FocusSession() {
           )
         : telemetry.consistency;
 
-    const distribution = {
-      ...focusStateCountsRef.current,
-    };
+    const distribution = { ...focusStateCountsRef.current };
 
     const dominantFocusState = (
       Object.entries(distribution) as [
@@ -413,16 +458,12 @@ function FocusSession() {
     ).reduce(
       (dominant, current) =>
         current[1] > dominant[1] ? current : dominant,
-      ["CALIBRATING", -1] as [
-        StoredFocusState,
-        number
-      ]
+      ["CALIBRATING", -1] as [StoredFocusState, number]
     )[0];
 
     const storedSession: FocusSessionData = {
       id: crypto.randomUUID(),
-      title:
-        sessionTitle.trim() || "Untitled Focus Session",
+      title: sessionTitle.trim() || "Untitled Focus Session",
       date: endTime.toISOString(),
       startTime: startTime.toISOString(),
       endTime: endTime.toISOString(),
@@ -445,12 +486,14 @@ function FocusSession() {
     setSessionStatus("ENDED");
   };
 
-  /* RESET */
+  /* Reset current timer */
   const resetSession = () => {
     audioEngine.stop();
     resetTelemetry();
 
+    setTimerMode("FOCUS");
     setElapsedSeconds(0);
+    setBreakSecondsRemaining(0);
     setText("");
     setDriftEvents(0);
 
@@ -470,15 +513,15 @@ function FocusSession() {
     };
 
     lastTrackedSecondRef.current = -1;
-
     setSessionStatus("READY");
   };
 
-  /* FORMAT TIME */
+  /* Format time */
   const formatTime = (totalSeconds: number) => {
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
+    const safeSeconds = Math.max(0, totalSeconds);
+    const hours = Math.floor(safeSeconds / 3600);
+    const minutes = Math.floor((safeSeconds % 3600) / 60);
+    const seconds = safeSeconds % 60;
 
     return [
       hours.toString().padStart(2, "0"),
@@ -486,6 +529,10 @@ function FocusSession() {
       seconds.toString().padStart(2, "0"),
     ].join(":");
   };
+
+  const displayedTime = isFocusMode
+    ? formatTime(Math.max(0, focusDurationSeconds - elapsedSeconds))
+    : formatTime(breakSecondsRemaining);
 
   const stateLabel = focusState
     .replace(/_/g, " ")
@@ -526,7 +573,9 @@ function FocusSession() {
                 : "bg-slate-500"
             }`}
           />
-          {sessionStatus}
+          {timerMode === "FOCUS"
+            ? sessionStatus
+            : `${timerMode.replace("_", " ")} · ${sessionStatus}`}
         </div>
       </div>
 
@@ -548,9 +597,17 @@ function FocusSession() {
 
         <LiveMetric
           icon={<Clock3 size={20} />}
-          label="Session Time"
-          value={formatTime(elapsedSeconds)}
-          detail={`${telemetry.keyCount} keystrokes · ${preferences.focusDuration} min target`}
+          label={isFocusMode ? "Focus Timer" : "Break Timer"}
+          value={displayedTime}
+          detail={
+            isFocusMode
+              ? `${telemetry.keyCount} keystrokes · ${preferences.focusDuration} min target`
+              : `${timerMode === "SHORT_BREAK" ? "Short" : "Long"} break · ${
+                  timerMode === "SHORT_BREAK"
+                    ? preferences.shortBreak
+                    : preferences.longBreak
+                } min`
+          }
         />
 
         <LiveMetric
@@ -572,68 +629,108 @@ function FocusSession() {
               </p>
 
               <h2 className="mt-2 text-xl font-semibold text-white">
-                Your workspace
+                {isFocusMode
+                  ? "Your workspace"
+                  : timerMode === "SHORT_BREAK"
+                    ? "Short break"
+                    : "Long break"}
               </h2>
             </div>
 
             <input
               value={sessionTitle}
-              onChange={(event) =>
-                setSessionTitle(event.target.value)
-              }
+              onChange={(event) => setSessionTitle(event.target.value)}
               disabled={sessionStatus === "RUNNING"}
               className="rounded-xl border border-white/10 bg-black/20 px-4 py-2 text-sm text-slate-300 outline-none focus:border-violet-500 disabled:opacity-60"
             />
           </div>
 
-          <textarea
-            value={text}
-            onChange={(event) => {
-              setText(event.target.value);
-              registerKeystroke();
-            }}
-            disabled={!isRunning}
-            placeholder={
-              isRunning
-                ? "Start typing here... AuraVibe is analysing your focus and adapting your environment in real time."
-                : "Click Start Session to activate your workspace."
-            }
-            className="mt-5 h-80 w-full resize-none rounded-2xl border border-white/[0.08] bg-[#070a14] p-5 text-sm leading-7 text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-violet-500/60 disabled:cursor-not-allowed disabled:opacity-60"
-          />
+          {isFocusMode ? (
+            <textarea
+              value={text}
+              onChange={(event) => {
+                setText(event.target.value);
+                registerKeystroke();
+              }}
+              disabled={!isRunning}
+              placeholder={
+                isRunning
+                  ? "Start typing here... AuraVibe is analysing your focus and adapting your environment in real time."
+                  : "Click Start Session to activate your workspace."
+              }
+              className="mt-5 h-80 w-full resize-none rounded-2xl border border-white/[0.08] bg-[#070a14] p-5 text-sm leading-7 text-slate-200 outline-none transition placeholder:text-slate-600 focus:border-violet-500/60 disabled:cursor-not-allowed disabled:opacity-60"
+            />
+          ) : (
+            <div className="mt-5 flex h-80 flex-col items-center justify-center rounded-2xl border border-white/[0.08] bg-[#070a14] p-8 text-center">
+              <Clock3 size={42} className="text-emerald-300" />
+              <h3 className="mt-5 text-2xl font-semibold text-white">
+                Take a breath
+              </h3>
+              <p className="mt-3 max-w-sm text-sm leading-6 text-slate-400">
+                Step away from your workspace, stretch, and rest your eyes.
+                Your break timer will continue running.
+              </p>
+              <p className="mt-5 text-xs text-slate-500">
+                Focus session data is not recorded during breaks.
+              </p>
+            </div>
+          )}
 
           {/* BUTTONS */}
           <div className="mt-5 flex flex-wrap gap-3">
-            {!isRunning && sessionStatus !== "PAUSED" && (
-              <button
-                onClick={startSession}
-                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
-              >
-                <Play size={17} fill="currentColor" />
-                {sessionStatus === "ENDED"
-                  ? "Start New Session"
-                  : "Start Session"}
-              </button>
-            )}
+            {!isRunning &&
+              (sessionStatus === "READY" ||
+                sessionStatus === "ENDED") &&
+              isFocusMode && (
+                <button
+                  onClick={startSession}
+                  className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                >
+                  <Play size={17} fill="currentColor" />
+                  {sessionStatus === "ENDED"
+                    ? "Start New Session"
+                    : "Start Session"}
+                </button>
+              )}
 
-            {sessionStatus === "PAUSED" && !isFocusComplete && (
+            {sessionStatus === "PAUSED" && !isTimerComplete && (
               <button
-                onClick={startSession}
+                onClick={() => setSessionStatus("RUNNING")}
                 className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-3 text-sm font-semibold text-white"
               >
                 <Play size={17} fill="currentColor" />
-                Resume Session
+                Resume {isFocusMode ? "Session" : "Break"}
               </button>
             )}
 
-            {sessionStatus === "PAUSED" && isFocusComplete && (
-              <button
-                onClick={endSession}
-                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-3 text-sm font-semibold text-white"
-              >
-                <Square size={16} fill="currentColor" />
-                Complete & Save
-              </button>
-            )}
+            {sessionStatus === "PAUSED" &&
+              isTimerComplete &&
+              isFocusMode && (
+                <button
+                  onClick={endSession}
+                  className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-3 text-sm font-semibold text-white"
+                >
+                  <Square size={16} fill="currentColor" />
+                  Complete &amp; Save
+                </button>
+              )}
+
+            {sessionStatus === "PAUSED" &&
+              isTimerComplete &&
+              !isFocusMode && (
+                <button
+                  onClick={() => {
+                    setTimerMode("FOCUS");
+                    setBreakSecondsRemaining(0);
+                    setElapsedSeconds(0);
+                    setSessionStatus("READY");
+                  }}
+                  className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-3 text-sm font-semibold text-white"
+                >
+                  <Play size={17} fill="currentColor" />
+                  Return to Focus
+                </button>
+              )}
 
             {isRunning && (
               <button
@@ -645,14 +742,32 @@ function FocusSession() {
               </button>
             )}
 
-            {(isRunning || sessionStatus === "PAUSED") &&
+            {isFocusMode &&
+              (isRunning || sessionStatus === "PAUSED") &&
               !isFocusComplete && (
                 <button
                   onClick={endSession}
                   className="flex items-center gap-2 rounded-xl border border-rose-400/20 bg-rose-400/10 px-5 py-3 text-sm font-semibold text-rose-200"
                 >
                   <Square size={16} fill="currentColor" />
-                  End & Save
+                  End &amp; Save
+                </button>
+              )}
+
+            {!isFocusMode &&
+              (isRunning || sessionStatus === "PAUSED") && (
+                <button
+                  onClick={() => {
+                    audioEngine.stop();
+                    setTimerMode("FOCUS");
+                    setBreakSecondsRemaining(0);
+                    setElapsedSeconds(0);
+                    setSessionStatus("READY");
+                  }}
+                  className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-5 py-3 text-sm font-semibold text-slate-300"
+                >
+                  <Square size={16} />
+                  End Break
                 </button>
               )}
 
@@ -663,6 +778,26 @@ function FocusSession() {
               <RotateCcw size={17} />
               Reset
             </button>
+
+            {!isRunning && (
+              <>
+                <button
+                  onClick={() => startBreak("SHORT_BREAK")}
+                  className="flex items-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-5 py-3 text-sm font-semibold text-emerald-200"
+                >
+                  <Clock3 size={17} />
+                  Short Break
+                </button>
+
+                <button
+                  onClick={() => startBreak("LONG_BREAK")}
+                  className="flex items-center gap-2 rounded-xl border border-sky-400/20 bg-sky-400/10 px-5 py-3 text-sm font-semibold text-sky-200"
+                >
+                  <Clock3 size={17} />
+                  Long Break
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -677,7 +812,6 @@ function FocusSession() {
               <p className="text-xs font-semibold tracking-[0.16em] text-violet-300">
                 ADAPTIVE ENGINE
               </p>
-
               <h2 className="mt-1 font-semibold text-white">
                 Live focus analysis
               </h2>
@@ -686,13 +820,13 @@ function FocusSession() {
 
           <div className="mt-7 rounded-2xl border border-white/[0.07] bg-black/20 p-5">
             <p className="text-xs text-slate-500">CURRENT STATE</p>
-
             <h3 className="mt-3 text-2xl font-bold text-white">
-              {stateLabel}
+              {isFocusMode ? stateLabel : "On Break"}
             </h3>
-
             <p className="mt-3 text-sm leading-6 text-slate-400">
-              {getFocusMessage(focusState)}
+              {isFocusMode
+                ? getFocusMessage(focusState)
+                : "Your break is in progress. Relax before returning to your next focus session."}
             </p>
           </div>
 
@@ -701,7 +835,6 @@ function FocusSession() {
               label="Drift events"
               value={driftEvents.toString()}
             />
-
             <InfoRow
               label="Adaptive soundscape"
               value={adaptiveSound.name}
@@ -727,7 +860,6 @@ function FocusSession() {
                 <span className="text-slate-500">
                   Adaptive intensity
                 </span>
-
                 <span className="font-semibold text-violet-200">
                   {Math.round(adaptiveSound.intensity * 100)}%
                 </span>
@@ -744,11 +876,11 @@ function FocusSession() {
             </div>
 
             <p className="mt-5 text-xs leading-5 text-slate-500">
-              {preferences.soundEnabled
-                ? isRunning
+              {!preferences.soundEnabled
+                ? "Sound is disabled in Settings."
+                : isRunning && isFocusMode
                   ? "Adaptive audio is enabled and responds to your live focus state."
-                  : "Audio will play when you start a focus session."
-                : "Sound is disabled in Settings."}
+                  : "Adaptive audio plays during active focus sessions."}
             </p>
           </div>
         </div>
@@ -773,17 +905,14 @@ function LiveMetric({
       <div className="flex items-start justify-between">
         <div>
           <p className="text-sm text-slate-400">{label}</p>
-
           <p className="mt-3 text-2xl font-bold text-white">
             {value}
           </p>
         </div>
-
         <div className="rounded-xl bg-violet-500/10 p-3 text-violet-300">
           {icon}
         </div>
       </div>
-
       <p className="mt-4 text-xs text-slate-500">{detail}</p>
     </div>
   );
