@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
@@ -120,17 +119,10 @@ function FocusSession() {
   const isFocusMode = timerMode === "FOCUS";
   const focusDurationSeconds = preferences.focusDuration * 60;
 
-  const breakDurationSeconds =
-    (timerMode === "SHORT_BREAK"
-      ? preferences.shortBreak
-      : preferences.longBreak) * 60;
-
   const isFocusComplete =
     isFocusMode && elapsedSeconds >= focusDurationSeconds;
-
   const isBreakComplete =
     !isFocusMode && breakSecondsRemaining <= 0;
-
   const isTimerComplete = isFocusMode
     ? isFocusComplete
     : isBreakComplete;
@@ -141,11 +133,8 @@ function FocusSession() {
     resetTelemetry,
   } = useTelemetry(isRunning && isFocusMode);
 
-  /* Synchronize preferences from Settings */
   useEffect(() => {
-    const syncPreferences = () => {
-      setPreferences(readPreferences());
-    };
+    const syncPreferences = () => setPreferences(readPreferences());
 
     const handleStorage = (event: StorageEvent) => {
       if (
@@ -171,7 +160,6 @@ function FocusSession() {
     };
   }, []);
 
-  /* Focus and break countdowns */
   useEffect(() => {
     if (!isRunning || isTimerComplete) return;
 
@@ -195,7 +183,6 @@ function FocusSession() {
     focusDurationSeconds,
   ]);
 
-  /* Pause automatically when a timer completes */
   useEffect(() => {
     if (isRunning && isTimerComplete) {
       audioEngine.stop();
@@ -203,7 +190,6 @@ function FocusSession() {
     }
   }, [isRunning, isTimerComplete]);
 
-  /* Live focus score */
   const focusScore = useMemo(() => {
     if (sessionStatus === "READY" || !isFocusMode) return 0;
 
@@ -220,7 +206,6 @@ function FocusSession() {
     isFocusMode,
   ]);
 
-  /* Live focus state */
   const focusState: FocusState = useMemo(() => {
     if (
       sessionStatus === "READY" ||
@@ -241,7 +226,6 @@ function FocusSession() {
     isFocusMode,
   ]);
 
-  /* Adaptive sound recommendation */
   const adaptiveSound = useMemo(
     () =>
       getAdaptiveSoundscape(
@@ -252,7 +236,6 @@ function FocusSession() {
     [focusState, telemetry.wpm, telemetry.consistency]
   );
 
-  /* Update selected soundscape while focusing */
   useEffect(() => {
     if (!isRunning || !isFocusMode) return;
 
@@ -267,7 +250,6 @@ function FocusSession() {
     setSelectedSoundscape,
   ]);
 
-  /* Audio playback, respecting Settings */
   useEffect(() => {
     if (
       !isRunning ||
@@ -283,9 +265,7 @@ function FocusSession() {
       adaptiveSound.intensity
     );
 
-    return () => {
-      audioEngine.stop();
-    };
+    return () => audioEngine.stop();
   }, [
     isRunning,
     isFocusMode,
@@ -294,7 +274,6 @@ function FocusSession() {
     adaptiveSound.intensity,
   ]);
 
-  /* Collect focus analytics only during focus sessions */
   useEffect(() => {
     if (
       !isRunning ||
@@ -308,7 +287,6 @@ function FocusSession() {
     lastTrackedSecondRef.current = elapsedSeconds;
     wpmSamplesRef.current.push(telemetry.wpm);
     consistencySamplesRef.current.push(telemetry.consistency);
-
     focusStateCountsRef.current[focusState as StoredFocusState] += 1;
   }, [
     isRunning,
@@ -319,7 +297,6 @@ function FocusSession() {
     focusState,
   ]);
 
-  /* Detect attention drift during focus */
   useEffect(() => {
     if (!isFocusMode) {
       driftDetectedRef.current = false;
@@ -340,7 +317,20 @@ function FocusSession() {
     }
   }, [focusState, isFocusMode]);
 
-  /* Start or resume a focus session */
+  const resetAnalytics = () => {
+    wpmSamplesRef.current = [];
+    consistencySamplesRef.current = [];
+    focusStateCountsRef.current = {
+      CALIBRATING: 0,
+      FOCUSED: 0,
+      DEEP_FOCUS: 0,
+      UNSTABLE: 0,
+      ATTENTION_DRIFT: 0,
+      IDLE: 0,
+    };
+    lastTrackedSecondRef.current = -1;
+  };
+
   const startSession = () => {
     if (sessionStatus === "PAUSED") {
       if (isTimerComplete) {
@@ -368,25 +358,11 @@ function FocusSession() {
 
       driftDetectedRef.current = false;
       sessionStartedAtRef.current = new Date();
-
-      wpmSamplesRef.current = [];
-      consistencySamplesRef.current = [];
-
-      focusStateCountsRef.current = {
-        CALIBRATING: 0,
-        FOCUSED: 0,
-        DEEP_FOCUS: 0,
-        UNSTABLE: 0,
-        ATTENTION_DRIFT: 0,
-        IDLE: 0,
-      };
-
-      lastTrackedSecondRef.current = -1;
+      resetAnalytics();
       setSessionStatus("RUNNING");
     }
   };
 
-  /* Start a short or long break */
   const startBreak = (mode: "SHORT_BREAK" | "LONG_BREAK") => {
     audioEngine.stop();
 
@@ -400,7 +376,6 @@ function FocusSession() {
     setSessionStatus("RUNNING");
   };
 
-  /* Pause */
   const pauseSession = () => {
     if (sessionStatus === "RUNNING") {
       setSessionStatus("PAUSED");
@@ -408,7 +383,6 @@ function FocusSession() {
     }
   };
 
-  /* End and save focus session; breaks are never saved as focus */
   const endSession = () => {
     if (!isFocusMode) {
       audioEngine.stop();
@@ -425,8 +399,7 @@ function FocusSession() {
     }
 
     const endTime = new Date();
-    const startTime =
-      sessionStartedAtRef.current ?? endTime;
+    const startTime = sessionStartedAtRef.current ?? endTime;
 
     const averageWpm =
       wpmSamplesRef.current.length > 0
@@ -486,7 +459,6 @@ function FocusSession() {
     setSessionStatus("ENDED");
   };
 
-  /* Reset current timer */
   const resetSession = () => {
     audioEngine.stop();
     resetTelemetry();
@@ -499,24 +471,10 @@ function FocusSession() {
 
     driftDetectedRef.current = false;
     sessionStartedAtRef.current = null;
-
-    wpmSamplesRef.current = [];
-    consistencySamplesRef.current = [];
-
-    focusStateCountsRef.current = {
-      CALIBRATING: 0,
-      FOCUSED: 0,
-      DEEP_FOCUS: 0,
-      UNSTABLE: 0,
-      ATTENTION_DRIFT: 0,
-      IDLE: 0,
-    };
-
-    lastTrackedSecondRef.current = -1;
+    resetAnalytics();
     setSessionStatus("READY");
   };
 
-  /* Format time */
   const formatTime = (totalSeconds: number) => {
     const safeSeconds = Math.max(0, totalSeconds);
     const hours = Math.floor(safeSeconds / 3600);
@@ -541,18 +499,15 @@ function FocusSession() {
 
   return (
     <div className="pb-10">
-      {/* HEADER */}
       <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <div className="flex items-center gap-2 text-sm text-violet-300">
             <Activity size={16} />
             REAL-TIME TELEMETRY
           </div>
-
           <h1 className="mt-3 text-3xl font-bold text-white">
             Focus Session
           </h1>
-
           <p className="mt-2 text-sm text-slate-400">
             AuraVibe analyses your typing rhythm and adapts
             your focus environment in real time.
@@ -568,9 +523,7 @@ function FocusSession() {
         >
           <span
             className={`h-2 w-2 rounded-full ${
-              isRunning
-                ? "animate-pulse bg-emerald-400"
-                : "bg-slate-500"
+              isRunning ? "animate-pulse bg-emerald-400" : "bg-slate-500"
             }`}
           />
           {timerMode === "FOCUS"
@@ -579,7 +532,6 @@ function FocusSession() {
         </div>
       </div>
 
-      {/* METRICS */}
       <section className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <LiveMetric
           icon={<Brain size={20} />}
@@ -587,14 +539,12 @@ function FocusSession() {
           value={`${focusScore}%`}
           detail={stateLabel}
         />
-
         <LiveMetric
           icon={<Activity size={20} />}
           label="Typing Speed"
           value={`${telemetry.wpm}`}
           detail="Words per minute"
         />
-
         <LiveMetric
           icon={<Clock3 size={20} />}
           label={isFocusMode ? "Focus Timer" : "Break Timer"}
@@ -609,7 +559,6 @@ function FocusSession() {
                 } min`
           }
         />
-
         <LiveMetric
           icon={<Sparkles size={20} />}
           label="Consistency"
@@ -618,16 +567,13 @@ function FocusSession() {
         />
       </section>
 
-      {/* MAIN CONTENT */}
       <section className="mt-6 grid gap-6 xl:grid-cols-[1.5fr_0.9fr]">
-        {/* WORKSPACE */}
         <div className="rounded-2xl border border-white/[0.06] bg-white/[0.025] p-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-xs font-semibold tracking-[0.18em] text-violet-300">
                 LIVE INPUT STREAM
               </p>
-
               <h2 className="mt-2 text-xl font-semibold text-white">
                 {isFocusMode
                   ? "Your workspace"
@@ -676,20 +622,16 @@ function FocusSession() {
             </div>
           )}
 
-          {/* BUTTONS */}
           <div className="mt-5 flex flex-wrap gap-3">
             {!isRunning &&
-              (sessionStatus === "READY" ||
-                sessionStatus === "ENDED") &&
+              (sessionStatus === "READY" || sessionStatus === "ENDED") &&
               isFocusMode && (
                 <button
                   onClick={startSession}
                   className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
                 >
                   <Play size={17} fill="currentColor" />
-                  {sessionStatus === "ENDED"
-                    ? "Start New Session"
-                    : "Start Session"}
+                  {sessionStatus === "ENDED" ? "Start New Session" : "Start Session"}
                 </button>
               )}
 
@@ -703,34 +645,30 @@ function FocusSession() {
               </button>
             )}
 
-            {sessionStatus === "PAUSED" &&
-              isTimerComplete &&
-              isFocusMode && (
-                <button
-                  onClick={endSession}
-                  className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-3 text-sm font-semibold text-white"
-                >
-                  <Square size={16} fill="currentColor" />
-                  Complete &amp; Save
-                </button>
-              )}
+            {sessionStatus === "PAUSED" && isTimerComplete && isFocusMode && (
+              <button
+                onClick={endSession}
+                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-3 text-sm font-semibold text-white"
+              >
+                <Square size={16} fill="currentColor" />
+                Complete &amp; Save
+              </button>
+            )}
 
-            {sessionStatus === "PAUSED" &&
-              isTimerComplete &&
-              !isFocusMode && (
-                <button
-                  onClick={() => {
-                    setTimerMode("FOCUS");
-                    setBreakSecondsRemaining(0);
-                    setElapsedSeconds(0);
-                    setSessionStatus("READY");
-                  }}
-                  className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-3 text-sm font-semibold text-white"
-                >
-                  <Play size={17} fill="currentColor" />
-                  Return to Focus
-                </button>
-              )}
+            {sessionStatus === "PAUSED" && isTimerComplete && !isFocusMode && (
+              <button
+                onClick={() => {
+                  setTimerMode("FOCUS");
+                  setBreakSecondsRemaining(0);
+                  setElapsedSeconds(0);
+                  setSessionStatus("READY");
+                }}
+                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-5 py-3 text-sm font-semibold text-white"
+              >
+                <Play size={17} fill="currentColor" />
+                Return to Focus
+              </button>
+            )}
 
             {isRunning && (
               <button
@@ -788,7 +726,6 @@ function FocusSession() {
                   <Clock3 size={17} />
                   Short Break
                 </button>
-
                 <button
                   onClick={() => startBreak("LONG_BREAK")}
                   className="flex items-center gap-2 rounded-xl border border-sky-400/20 bg-sky-400/10 px-5 py-3 text-sm font-semibold text-sky-200"
@@ -801,13 +738,11 @@ function FocusSession() {
           </div>
         </div>
 
-        {/* ADAPTIVE PANEL */}
         <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-500/[0.12] to-white/[0.02] p-6">
           <div className="flex items-center gap-3">
             <div className="rounded-xl bg-violet-500/15 p-3 text-violet-300">
               <Sparkles size={21} />
             </div>
-
             <div>
               <p className="text-xs font-semibold tracking-[0.16em] text-violet-300">
                 ADAPTIVE ENGINE
@@ -831,14 +766,8 @@ function FocusSession() {
           </div>
 
           <div className="mt-5 space-y-3">
-            <InfoRow
-              label="Drift events"
-              value={driftEvents.toString()}
-            />
-            <InfoRow
-              label="Adaptive soundscape"
-              value={adaptiveSound.name}
-            />
+            <InfoRow label="Drift events" value={driftEvents.toString()} />
+            <InfoRow label="Adaptive soundscape" value={adaptiveSound.name} />
           </div>
 
           <div className="mt-7 rounded-2xl border border-violet-500/15 bg-violet-500/5 p-5">
@@ -846,30 +775,23 @@ function FocusSession() {
               <Waves size={18} />
               <span className="font-medium">Now Playing</span>
             </div>
-
             <h3 className="mt-4 text-lg font-semibold text-white">
               {adaptiveSound.name}
             </h3>
-
             <p className="mt-3 text-sm leading-6 text-slate-400">
               {adaptiveSound.description}
             </p>
 
             <div className="mt-5">
               <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-500">
-                  Adaptive intensity
-                </span>
+                <span className="text-slate-500">Adaptive intensity</span>
                 <span className="font-semibold text-violet-200">
                   {Math.round(adaptiveSound.intensity * 100)}%
                 </span>
               </div>
-
               <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.06]">
                 <div
-                  style={{
-                    width: `${adaptiveSound.intensity * 100}%`,
-                  }}
+                  style={{ width: `${adaptiveSound.intensity * 100}%` }}
                   className="h-full rounded-full bg-gradient-to-r from-violet-600 to-indigo-400 transition-all duration-700"
                 />
               </div>
@@ -905,9 +827,7 @@ function LiveMetric({
       <div className="flex items-start justify-between">
         <div>
           <p className="text-sm text-slate-400">{label}</p>
-          <p className="mt-3 text-2xl font-bold text-white">
-            {value}
-          </p>
+          <p className="mt-3 text-2xl font-bold text-white">{value}</p>
         </div>
         <div className="rounded-xl bg-violet-500/10 p-3 text-violet-300">
           {icon}
